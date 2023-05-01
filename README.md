@@ -1,3 +1,26 @@
+# @jo12bar's Attempt at Learning to Write Rust Procedural Macros
+
+This is my personal attempt at completing @dtolnay's Rust proc macro workshop.
+All of my own work takes place on branches under the `jo12bar/` prefix. This keeps
+the original repo's CI setup from trying to run on absolutely everything cause I
+don't want to pay for GitHub Pro. Each project will have an associate pull request
+from its own branch into `jo12bar/main` in this repository, just to track things.
+
+## Todo
+
+- Projects
+  - [ ] [**Derive macro:** `derive(Builder)`](#derive-macro-derivebuilder)
+  - [ ] [**Derive macro:** `derive(CustomDebug)`](#derive-macro-derivecustomdebug)
+  - [ ] [**Function-like macro:** `seq!`](#function-like-macro-seq)
+  - [ ] [**Attribute macro:** `#[sorted]`](#attribute-macro-sorted)
+  - [ ] [**Attribute macro:** `#[bitfield]`](#attribute-macro-bitfield)
+
+---
+
+<details>
+
+<summary>Expand original README</summary>
+
 # Rust Latam: procedural macros workshop
 
 *This repo contains a selection of projects designed to learn to write Rust
@@ -465,3 +488,5 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this codebase by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
 </sub>
+
+</details>
