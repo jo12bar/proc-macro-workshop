@@ -1,5 +1,5 @@
-use proc_macro2::{Span, TokenStream};
-use quote::{quote, quote_spanned};
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote, quote_spanned};
 use syn::{
     parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Fields, Ident, Index,
 };
@@ -10,7 +10,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let vis = input.vis;
     let name = input.ident;
-    let builder_name = Ident::new(&format!("{name}Builder"), Span::call_site());
+    let builder_name = format_ident!("{name}Builder");
 
     let Data::Struct(data_struct) = input.data else {
         unimplemented!("derive_builder is only implemented for structs, not enums or unions");
@@ -128,7 +128,7 @@ fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
         // number, prefix each field index with `field_` (e.g. `field_0()`, `field_32()`, ...)
         Fields::Unnamed(ref fields) => {
             let field_methods = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                let name = Ident::new(&format!("field_{i}"), f.span());
+                let name = format_ident!("field_{i}");
                 let index = Index::from(i);
                 let ty = &f.ty;
                 quote_spanned! { f.span() =>
@@ -148,6 +148,8 @@ fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
     }
 }
 
+/// Implement the `build()` method, which turns the builder struct into the actual
+/// struct after checking that all fields are properly set.
 fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStream {
     let builder_has_unset_fields = match data_struct.fields {
         Fields::Named(ref fields) => {
