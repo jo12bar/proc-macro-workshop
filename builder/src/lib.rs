@@ -1,7 +1,8 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Fields, Ident, Index,
+    parse_macro_input, spanned::Spanned, AngleBracketedGenericArguments, Data, DataStruct,
+    DeriveInput, Fields, GenericArgument, Ident, Index, PathArguments, PathSegment, Type, TypePath,
 };
 
 #[proc_macro_derive(Builder)]
@@ -44,11 +45,16 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
     match data_struct.fields {
         // Named structs are basically normal structs. Basically duplicate the
         // original struct body, but wrap each field type declaration in an Option< >
+        // (unless if it's already wrapped in an Option< >)
         Fields::Named(ref fields) => {
             let retyped_fields = fields.named.iter().map(|f| {
                 let name = &f.ident;
                 let ty = &f.ty;
-                quote_spanned! {f.span() => #name: Option<#ty>}
+                if type_is_optional(ty) {
+                    quote_spanned! { f.span() => #name: #ty }
+                } else {
+                    quote_spanned! { f.span() => #name: Option<#ty> }
+                }
             });
             quote! {
                 {
@@ -63,7 +69,11 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
         Fields::Unnamed(ref fields) => {
             let retyped_fields = fields.unnamed.iter().map(|f| {
                 let ty = &f.ty;
-                quote_spanned! {f.span() => Option<#ty>}
+                if type_is_optional(ty) {
+                    quote_spanned! { f.span() => #ty }
+                } else {
+                    quote_spanned! { f.span() => Option<#ty> }
+                }
             });
             quote! {
                 ( #(#retyped_fields),* );
@@ -111,7 +121,7 @@ fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
         Fields::Named(ref fields) => {
             let field_methods = fields.named.iter().map(|f| {
                 let name = &f.ident;
-                let ty = &f.ty;
+                let ty = get_optional_type(&f.ty).unwrap_or(&f.ty);
                 quote_spanned! { f.span() =>
                     pub fn #name (&mut self, #name: #ty) -> &mut Self {
                         self.#name = Some(#name);
@@ -130,7 +140,7 @@ fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
             let field_methods = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let name = format_ident!("field_{i}");
                 let index = Index::from(i);
-                let ty = &f.ty;
+                let ty = get_optional_type(&f.ty).unwrap_or(&f.ty);
                 quote_spanned! { f.span() =>
                     pub fn #name (&mut self, value: #ty) -> &mut Self {
                         self.#index = Some(value);
@@ -155,14 +165,22 @@ fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStr
         Fields::Named(ref fields) => {
             let field_none_checks = fields.named.iter().map(|f| {
                 let field_name = &f.ident;
-                quote_spanned! { f.span() => self.#field_name.is_none() }
+                if type_is_optional(&f.ty) {
+                    quote_spanned! { f.span() => false }
+                } else {
+                    quote_spanned! { f.span() => self.#field_name.is_none() }
+                }
             });
             quote! { false #(|| #field_none_checks)* }
         }
         Fields::Unnamed(ref fields) => {
             let field_none_checks = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let index = Index::from(i);
-                quote_spanned! { f.span() => self.#index.is_none() }
+                if type_is_optional(&f.ty) {
+                    quote_spanned! { f.span() => false }
+                } else {
+                    quote_spanned! { f.span() => self.#index.is_none() }
+                }
             });
             quote! { false #(|| #field_none_checks)* }
         }
@@ -173,8 +191,14 @@ fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStr
         Fields::Named(ref fields) => {
             let unwrapped_fields = fields.named.iter().map(|f| {
                 let field_name = &f.ident;
-                quote_spanned! { f.span() =>
-                    #field_name: self.#field_name.take().unwrap()
+                if type_is_optional(&f.ty) {
+                    quote_spanned! { f.span() =>
+                        #field_name: self.#field_name.take()
+                    }
+                } else {
+                    quote_spanned! { f.span() =>
+                        #field_name: self.#field_name.take().unwrap()
+                    }
                 }
             });
             quote! {
@@ -185,8 +209,10 @@ fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStr
         Fields::Unnamed(ref fields) => {
             let unwrapped_fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let index = Index::from(i);
-                quote_spanned! { f.span() =>
-                    self.#index.take().unwrap()
+                if type_is_optional(&f.ty) {
+                    quote_spanned! { f.span() => self.#index.take() }
+                } else {
+                    quote_spanned! { f.span() => self.#index.take().unwrap() }
                 }
             });
             quote! {
@@ -211,4 +237,46 @@ fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStr
             }
         }
     }
+}
+
+/// Gets the type T for a type written literally as `Option<T>`.
+fn get_optional_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(TypePath { qself: None, path }) = ty else {
+        return None;
+    };
+
+    if path.segments.len() != 1 {
+        return None;
+    }
+    let path_seg = path.segments.first().unwrap();
+
+    if path_seg.ident != "Option" {
+        return None;
+    }
+
+    let PathSegment {
+        ident: _,
+        arguments: PathArguments::AngleBracketed(
+            AngleBracketedGenericArguments {
+                args,
+                ..
+            }
+        )
+    } = path_seg else {
+        return None;
+    };
+
+    if args.len() != 1 {
+        return None;
+    }
+    if let Some(GenericArgument::Type(optional_type)) = args.first() {
+        Some(optional_type)
+    } else {
+        None
+    }
+}
+
+/// Returns true if the type of a field is written literally as `Option<...>`.
+fn type_is_optional(ty: &Type) -> bool {
+    get_optional_type(ty).is_some()
 }

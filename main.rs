@@ -13,14 +13,14 @@ pub struct Command {
     executable: String,
     args: Vec<String>,
     env: Vec<String>,
-    current_dir: String,
+    current_dir: Option<String>,
 }
 
 #[derive(Builder, Debug)]
 pub(crate) struct Command2;
 
 #[derive(Builder, Debug)]
-pub(self) struct Command3(u32, u32, u32, f64);
+pub(self) struct Command3(u32, u32, u32, Option<f64>);
 
 fn main() {
     let mut builder = Command::builder();
@@ -34,7 +34,7 @@ fn main() {
     println!("executable: {}", command.executable);
     println!("args: {:?}", command.args);
     println!("env: {:?}", command.env);
-    println!("current_dir: {}", command.current_dir);
+    println!("current_dir: {:?}", command.current_dir);
 
     let mut builder = Command2::builder();
     let command2 = builder.build().unwrap();
