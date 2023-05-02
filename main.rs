@@ -23,7 +23,11 @@ pub(crate) struct Command2;
 pub(self) struct Command3(u32, u32, u32, f64);
 
 fn main() {
-    let builder = Command::builder();
+    let mut builder = Command::builder();
+    builder.executable("cargo".to_owned());
+    builder.args(vec!["build".to_owned(), "--release".to_owned()]);
+    builder.env(vec![]);
+    builder.current_dir("..".to_owned());
 
     let _ = builder;
 
@@ -31,7 +35,9 @@ fn main() {
 
     let _ = builder;
 
-    let builder = Command3::builder();
+    let mut builder = Command3::builder();
+    builder.field_0(3).field_2(45).field_3(-0.34);
+    builder.field_1(2);
 
     let _ = builder;
 }

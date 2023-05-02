@@ -1,6 +1,8 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{quote, quote_spanned};
-use syn::{parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Ident};
+use syn::{
+    parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Fields, Ident, Index,
+};
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -16,6 +18,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let builder_struct_decl_fields = builder_struct_decl_fields(&data_struct);
     let init_builder_struct_fields = init_builder_struct_fields(&data_struct);
+    let impl_builder_field_methods = impl_builder_field_methods(&data_struct);
 
     let expanded = quote! {
         impl #name {
@@ -25,6 +28,10 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
 
         #vis struct #builder_name #builder_struct_decl_fields
+
+        impl #builder_name {
+            #impl_builder_field_methods
+        }
     };
 
     proc_macro::TokenStream::from(expanded)
@@ -35,7 +42,7 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
     match data_struct.fields {
         // Named structs are basically normal structs. Basically duplicate the
         // original struct body, but wrap each field type declaration in an Option< >
-        syn::Fields::Named(ref fields) => {
+        Fields::Named(ref fields) => {
             let retyped_fields = fields.named.iter().map(|f| {
                 let name = &f.ident;
                 let ty = &f.ty;
@@ -51,7 +58,7 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
         // Unnamed structs are basically Rust's tuple structs, where fields are
         // numbered and not named. Create enough Option<Type> fields for how
         // many fields there are, seperated with commas, and surrounded by ();
-        syn::Fields::Unnamed(ref fields) => {
+        Fields::Unnamed(ref fields) => {
             let retyped_fields = fields.unnamed.iter().map(|f| {
                 let ty = &f.ty;
                 quote_spanned! {f.span() => Option<#ty>}
@@ -62,14 +69,14 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
         }
 
         // Unit structs have an empty body, and need to be terminated with a semicolon
-        syn::Fields::Unit => quote! { ; },
+        Fields::Unit => quote! { ; },
     }
 }
 
 /// Syntax to initialize all fields of the builder struct. All fields are initially set to `None`.
 fn init_builder_struct_fields(data_struct: &DataStruct) -> TokenStream {
     match data_struct.fields {
-        syn::Fields::Named(ref fields) => {
+        Fields::Named(ref fields) => {
             let initialized_fields = fields.named.iter().map(|f| {
                 let name = &f.ident;
                 quote_spanned! {f.span() => #name: None}
@@ -81,7 +88,7 @@ fn init_builder_struct_fields(data_struct: &DataStruct) -> TokenStream {
             }
         }
 
-        syn::Fields::Unnamed(ref fields) => {
+        Fields::Unnamed(ref fields) => {
             let initialized_fields = fields.unnamed.iter().map(|_| quote! { None });
             quote! {
                 ( #(#initialized_fields),* )
@@ -89,6 +96,52 @@ fn init_builder_struct_fields(data_struct: &DataStruct) -> TokenStream {
         }
 
         // Unit structs have an empty body
-        syn::Fields::Unit => TokenStream::new(),
+        Fields::Unit => TokenStream::new(),
+    }
+}
+
+/// Implement all methods on the builder struct for updating its fields.
+///
+/// Should be substituted inside an `impl #builder_name { }` block.
+fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
+    match data_struct.fields {
+        // Generate methods that match the names and types of each field
+        Fields::Named(ref fields) => {
+            let field_methods = fields.named.iter().map(|f| {
+                let name = &f.ident;
+                let ty = &f.ty;
+                quote_spanned! { f.span() =>
+                    pub fn #name (&mut self, #name: #ty) -> &mut Self {
+                        self.#name = Some(#name);
+                        self
+                    }
+                }
+            });
+            quote! {
+                #(#field_methods)*
+            }
+        }
+
+        // Generate enumerated methods. Since rust methods can't start with a
+        // number, prefix each field index with `field_` (e.g. `field_0()`, `field_32()`, ...)
+        Fields::Unnamed(ref fields) => {
+            let field_methods = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                let name = Ident::new(&format!("field_{i}"), f.span());
+                let index = Index::from(i);
+                let ty = &f.ty;
+                quote_spanned! { f.span() =>
+                    pub fn #name (&mut self, value: #ty) -> &mut Self {
+                        self.#index = Some(value);
+                        self
+                    }
+                }
+            });
+            quote! {
+                #(#field_methods)*
+            }
+        }
+
+        // No fields, so no methods
+        Fields::Unit => TokenStream::new(),
     }
 }
