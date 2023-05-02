@@ -19,6 +19,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let builder_struct_decl_fields = builder_struct_decl_fields(&data_struct);
     let init_builder_struct_fields = init_builder_struct_fields(&data_struct);
     let impl_builder_field_methods = impl_builder_field_methods(&data_struct);
+    let impl_builder_build_method = impl_builder_build_method(&data_struct, &name);
 
     let expanded = quote! {
         impl #name {
@@ -31,6 +32,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
         impl #builder_name {
             #impl_builder_field_methods
+            #impl_builder_build_method
         }
     };
 
@@ -143,5 +145,68 @@ fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
 
         // No fields, so no methods
         Fields::Unit => TokenStream::new(),
+    }
+}
+
+fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStream {
+    let builder_has_unset_fields = match data_struct.fields {
+        Fields::Named(ref fields) => {
+            let field_none_checks = fields.named.iter().map(|f| {
+                let field_name = &f.ident;
+                quote_spanned! { f.span() => self.#field_name.is_none() }
+            });
+            quote! { false #(|| #field_none_checks)* }
+        }
+        Fields::Unnamed(ref fields) => {
+            let field_none_checks = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                let index = Index::from(i);
+                quote_spanned! { f.span() => self.#index.is_none() }
+            });
+            quote! { false #(|| #field_none_checks)* }
+        }
+        Fields::Unit => quote! { false },
+    };
+
+    let struct_output = match data_struct.fields {
+        Fields::Named(ref fields) => {
+            let unwrapped_fields = fields.named.iter().map(|f| {
+                let field_name = &f.ident;
+                quote_spanned! { f.span() =>
+                    #field_name: self.#field_name.take().unwrap()
+                }
+            });
+            quote! {
+                #name { #(#unwrapped_fields),* }
+            }
+        }
+
+        Fields::Unnamed(ref fields) => {
+            let unwrapped_fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                let index = Index::from(i);
+                quote_spanned! { f.span() =>
+                    self.#index.take().unwrap()
+                }
+            });
+            quote! {
+                #name ( #(#unwrapped_fields),* )
+            }
+        }
+
+        Fields::Unit => quote! {
+            #name
+        },
+    };
+
+    let unset_err_msg =
+        format!("Could not build {name} struct, as one or more fields were left unset");
+
+    quote! {
+        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+            if #builder_has_unset_fields {
+                Err(#unset_err_msg.to_string().into())
+            } else {
+                Ok(#struct_output)
+            }
+        }
     }
 }

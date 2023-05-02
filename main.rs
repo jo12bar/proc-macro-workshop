@@ -16,10 +16,10 @@ pub struct Command {
     current_dir: String,
 }
 
-#[derive(Builder)]
+#[derive(Builder, Debug)]
 pub(crate) struct Command2;
 
-#[derive(Builder)]
+#[derive(Builder, Debug)]
 pub(self) struct Command3(u32, u32, u32, f64);
 
 fn main() {
@@ -29,15 +29,21 @@ fn main() {
     builder.env(vec![]);
     builder.current_dir("..".to_owned());
 
-    let _ = builder;
+    let command = builder.build().unwrap();
+    assert_eq!(command.executable, "cargo");
+    println!("executable: {}", command.executable);
+    println!("args: {:?}", command.args);
+    println!("env: {:?}", command.env);
+    println!("current_dir: {}", command.current_dir);
 
-    let builder = Command2::builder();
-
-    let _ = builder;
+    let mut builder = Command2::builder();
+    let command2 = builder.build().unwrap();
+    println!("{command2:?}");
 
     let mut builder = Command3::builder();
     builder.field_0(3).field_2(45).field_3(-0.34);
     builder.field_1(2);
 
-    let _ = builder;
+    let command3 = builder.build().unwrap();
+    println!("{command3:?}");
 }
