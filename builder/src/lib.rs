@@ -1,11 +1,12 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
 use syn::{
     parse_macro_input, spanned::Spanned, AngleBracketedGenericArguments, Data, DataStruct,
-    DeriveInput, Fields, GenericArgument, Ident, Index, PathArguments, PathSegment, Type, TypePath,
+    DeriveInput, Field, Fields, GenericArgument, Ident, Index, LitStr, PathArguments, PathSegment,
+    Type, TypePath,
 };
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -17,10 +18,17 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         unimplemented!("derive_builder is only implemented for structs, not enums or unions");
     };
 
-    let builder_struct_decl_fields = builder_struct_decl_fields(&data_struct);
-    let init_builder_struct_fields = init_builder_struct_fields(&data_struct);
-    let impl_builder_field_methods = impl_builder_field_methods(&data_struct);
-    let impl_builder_build_method = impl_builder_build_method(&data_struct, &name);
+    let builder_fields = match BuilderField::from_data_struct(&data_struct) {
+        Ok(builder_fields) => builder_fields,
+        Err(e) => {
+            return e.into_compile_error().into();
+        }
+    };
+
+    let builder_struct_decl_fields = builder_struct_decl_fields(&data_struct, &builder_fields);
+    let init_builder_struct_fields = init_builder_struct_fields(&data_struct, &builder_fields);
+    let impl_builder_field_methods = impl_builder_field_methods(&builder_fields);
+    let impl_builder_build_method = impl_builder_build_method(&data_struct, &builder_fields, &name);
 
     let expanded = quote! {
         impl #name {
@@ -41,19 +49,22 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 /// Generate the fields in the Builder struct declaration.
-fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
+fn builder_struct_decl_fields(
+    data_struct: &DataStruct,
+    builder_fields: &[BuilderField<'_>],
+) -> TokenStream {
     match data_struct.fields {
         // Named structs are basically normal structs. Basically duplicate the
         // original struct body, but wrap each field type declaration in an Option< >
         // (unless if it's already wrapped in an Option< >)
-        Fields::Named(ref fields) => {
-            let retyped_fields = fields.named.iter().map(|f| {
-                let name = &f.ident;
-                let ty = &f.ty;
-                if type_is_optional(ty) {
-                    quote_spanned! { f.span() => #name: #ty }
+        Fields::Named(_) => {
+            let retyped_fields = builder_fields.iter().map(|f| {
+                let name = &f.orig_name;
+                let ty = f.ty;
+                if f.is_optional_field() {
+                    quote_spanned! { f.orig_span => #name: #ty }
                 } else {
-                    quote_spanned! { f.span() => #name: Option<#ty> }
+                    quote_spanned! { f.orig_span => #name: Option<#ty> }
                 }
             });
             quote! {
@@ -66,13 +77,13 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
         // Unnamed structs are basically Rust's tuple structs, where fields are
         // numbered and not named. Create enough Option<Type> fields for how
         // many fields there are, seperated with commas, and surrounded by ();
-        Fields::Unnamed(ref fields) => {
-            let retyped_fields = fields.unnamed.iter().map(|f| {
-                let ty = &f.ty;
-                if type_is_optional(ty) {
-                    quote_spanned! { f.span() => #ty }
+        Fields::Unnamed(_) => {
+            let retyped_fields = builder_fields.iter().map(|f| {
+                let ty = f.ty;
+                if f.is_optional_field() {
+                    quote_spanned! { f.orig_span => #ty }
                 } else {
-                    quote_spanned! { f.span() => Option<#ty> }
+                    quote_spanned! { f.orig_span => Option<#ty> }
                 }
             });
             quote! {
@@ -86,12 +97,22 @@ fn builder_struct_decl_fields(data_struct: &DataStruct) -> TokenStream {
 }
 
 /// Syntax to initialize all fields of the builder struct. All fields are initially set to `None`.
-fn init_builder_struct_fields(data_struct: &DataStruct) -> TokenStream {
+///
+/// If a field must have an `each` builder method, then the field is instead
+/// initialized to `Some(Vec::new())`.
+fn init_builder_struct_fields(
+    data_struct: &DataStruct,
+    builder_fields: &[BuilderField<'_>],
+) -> TokenStream {
     match data_struct.fields {
-        Fields::Named(ref fields) => {
-            let initialized_fields = fields.named.iter().map(|f| {
-                let name = &f.ident;
-                quote_spanned! {f.span() => #name: None}
+        Fields::Named(_) => {
+            let initialized_fields = builder_fields.iter().map(|f| {
+                let name = &f.orig_name;
+                if f.meta.needs_each_fn() {
+                    quote_spanned! { f.orig_span => #name: Some(Vec::new()) }
+                } else {
+                    quote_spanned! { f.orig_span => #name: None }
+                }
             });
             quote! {
                 {
@@ -100,8 +121,14 @@ fn init_builder_struct_fields(data_struct: &DataStruct) -> TokenStream {
             }
         }
 
-        Fields::Unnamed(ref fields) => {
-            let initialized_fields = fields.unnamed.iter().map(|_| quote! { None });
+        Fields::Unnamed(_) => {
+            let initialized_fields = builder_fields.iter().map(|f| {
+                if f.meta.needs_each_fn() {
+                    quote_spanned! { f.orig_span => Some(Vec::new()) }
+                } else {
+                    quote_spanned! { f.orig_span => None }
+                }
+            });
             quote! {
                 ( #(#initialized_fields),* )
             }
@@ -115,71 +142,81 @@ fn init_builder_struct_fields(data_struct: &DataStruct) -> TokenStream {
 /// Implement all methods on the builder struct for updating its fields.
 ///
 /// Should be substituted inside an `impl #builder_name { }` block.
-fn impl_builder_field_methods(data_struct: &DataStruct) -> TokenStream {
-    match data_struct.fields {
-        // Generate methods that match the names and types of each field
-        Fields::Named(ref fields) => {
-            let field_methods = fields.named.iter().map(|f| {
-                let name = &f.ident;
-                let ty = get_optional_type(&f.ty).unwrap_or(&f.ty);
-                quote_spanned! { f.span() =>
-                    pub fn #name (&mut self, #name: #ty) -> &mut Self {
-                        self.#name = Some(#name);
-                        self
-                    }
-                }
-            });
-            quote! {
-                #(#field_methods)*
-            }
-        }
+fn impl_builder_field_methods(builder_fields: &[BuilderField<'_>]) -> TokenStream {
+    let field_methods = builder_fields.iter().map(|f| {
+        let fn_name = &f.fn_name;
+        let orig_name = &f.orig_name;
+        let ty = f.optional_field_type.unwrap_or(f.ty);
 
-        // Generate enumerated methods. Since rust methods can't start with a
-        // number, prefix each field index with `field_` (e.g. `field_0()`, `field_32()`, ...)
-        Fields::Unnamed(ref fields) => {
-            let field_methods = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                let name = format_ident!("field_{i}");
-                let index = Index::from(i);
-                let ty = get_optional_type(&f.ty).unwrap_or(&f.ty);
-                quote_spanned! { f.span() =>
-                    pub fn #name (&mut self, value: #ty) -> &mut Self {
-                        self.#index = Some(value);
-                        self
-                    }
-                }
-            });
-            quote! {
-                #(#field_methods)*
+        let mut builder_function = quote_spanned! { f.orig_span =>
+            pub fn #fn_name (&mut self, #fn_name: #ty) -> &mut Self {
+                self.#orig_name = Some(#fn_name);
+                self
             }
-        }
+        };
 
-        // No fields, so no methods
-        Fields::Unit => TokenStream::new(),
+        let each_function = if f.meta.needs_each_fn() {
+            // If the user requests to generate an each function with the same name
+            // as the normal builder function, don't generate the normal builder
+            // function.
+            let each_fn_opts = &f.meta.each_fn_opts.as_ref().unwrap();
+            let each_fn_name = &each_fn_opts.each_fn_name;
+            let each_fn_ty = &each_fn_opts.each_fn_ty;
+            let each_fn_name = quote! { #each_fn_name };
+            if fn_name.to_string() == each_fn_name.to_string() {
+                builder_function = TokenStream::new();
+            }
+
+            quote_spanned! { f.orig_span =>
+                pub fn #each_fn_name (&mut self, #each_fn_name: #each_fn_ty) -> &mut Self {
+                    // This unwrap is ok because self.#orig_name is guaranteed to be
+                    // initialized to Some(Vec::new()) if an each function is
+                    // generated. See the implementation of `init_builder_struct_fields()`.
+                    self.#orig_name.as_mut().unwrap().push(#each_fn_name);
+                    self
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        quote_spanned! { f.orig_span =>
+            #builder_function
+            #each_function
+        }
+    });
+
+    quote! {
+        #(#field_methods)*
     }
 }
 
 /// Implement the `build()` method, which turns the builder struct into the actual
 /// struct after checking that all fields are properly set.
-fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStream {
+fn impl_builder_build_method(
+    data_struct: &DataStruct,
+    builder_fields: &[BuilderField<'_>],
+    output_struct_name: &Ident,
+) -> TokenStream {
     let builder_has_unset_fields = match data_struct.fields {
-        Fields::Named(ref fields) => {
-            let field_none_checks = fields.named.iter().map(|f| {
-                let field_name = &f.ident;
-                if type_is_optional(&f.ty) {
-                    quote_spanned! { f.span() => false }
+        Fields::Named(_) => {
+            let field_none_checks = builder_fields.iter().map(|f| {
+                let orig_name = &f.orig_name;
+                if f.is_optional_field() {
+                    quote_spanned! { f.orig_span => false }
                 } else {
-                    quote_spanned! { f.span() => self.#field_name.is_none() }
+                    quote_spanned! { f.orig_span => self.#orig_name.is_none() }
                 }
             });
             quote! { false #(|| #field_none_checks)* }
         }
-        Fields::Unnamed(ref fields) => {
-            let field_none_checks = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                let index = Index::from(i);
-                if type_is_optional(&f.ty) {
-                    quote_spanned! { f.span() => false }
+        Fields::Unnamed(_) => {
+            let field_none_checks = builder_fields.iter().map(|f| {
+                let orig_name = &f.orig_name;
+                if f.is_optional_field() {
+                    quote_spanned! { f.orig_span => false }
                 } else {
-                    quote_spanned! { f.span() => self.#index.is_none() }
+                    quote_spanned! { f.orig_span => self.#orig_name.is_none() }
                 }
             });
             quote! { false #(|| #field_none_checks)* }
@@ -188,48 +225,49 @@ fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStr
     };
 
     let struct_output = match data_struct.fields {
-        Fields::Named(ref fields) => {
-            let unwrapped_fields = fields.named.iter().map(|f| {
-                let field_name = &f.ident;
-                if type_is_optional(&f.ty) {
-                    quote_spanned! { f.span() =>
-                        #field_name: self.#field_name.take()
+        Fields::Named(_) => {
+            let unwrapped_fields = builder_fields.iter().map(|f| {
+                let orig_name = &f.orig_name;
+                if f.is_optional_field() {
+                    quote_spanned! { f.orig_span =>
+                        #orig_name: self.#orig_name.take()
                     }
                 } else {
-                    quote_spanned! { f.span() =>
-                        #field_name: self.#field_name.take().unwrap()
+                    quote_spanned! { f.orig_span =>
+                        #orig_name: self.#orig_name.take().unwrap()
                     }
                 }
             });
             quote! {
-                #name { #(#unwrapped_fields),* }
+                #output_struct_name { #(#unwrapped_fields),* }
             }
         }
 
-        Fields::Unnamed(ref fields) => {
-            let unwrapped_fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                let index = Index::from(i);
-                if type_is_optional(&f.ty) {
-                    quote_spanned! { f.span() => self.#index.take() }
+        Fields::Unnamed(_) => {
+            let unwrapped_fields = builder_fields.iter().map(|f| {
+                let orig_name = &f.orig_name;
+                if f.is_optional_field() {
+                    quote_spanned! { f.orig_span => self.#orig_name.take() }
                 } else {
-                    quote_spanned! { f.span() => self.#index.take().unwrap() }
+                    quote_spanned! { f.orig_span => self.#orig_name.take().unwrap() }
                 }
             });
             quote! {
-                #name ( #(#unwrapped_fields),* )
+                #output_struct_name ( #(#unwrapped_fields),* )
             }
         }
 
         Fields::Unit => quote! {
-            #name
+            #output_struct_name
         },
     };
 
-    let unset_err_msg =
-        format!("Could not build {name} struct, as one or more fields were left unset");
+    let unset_err_msg = format!(
+        "Could not build {output_struct_name} struct, as one or more required fields were left unset"
+    );
 
     quote! {
-        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+        pub fn build(&mut self) -> Result<#output_struct_name, Box<dyn std::error::Error>> {
             if #builder_has_unset_fields {
                 Err(#unset_err_msg.to_string().into())
             } else {
@@ -239,8 +277,9 @@ fn impl_builder_build_method(data_struct: &DataStruct, name: &Ident) -> TokenStr
     }
 }
 
-/// Gets the type T for a type written literally as `Option<T>`.
-fn get_optional_type(ty: &Type) -> Option<&Type> {
+/// Gets the simple generic type `A` and inner type `T` when written literally
+/// as `A<T>`.
+fn get_simple_generic_and_inner_types(ty: &Type) -> Option<(&PathSegment, &Type)> {
     let Type::Path(TypePath { qself: None, path }) = ty else {
         return None;
     };
@@ -249,10 +288,6 @@ fn get_optional_type(ty: &Type) -> Option<&Type> {
         return None;
     }
     let path_seg = path.segments.first().unwrap();
-
-    if path_seg.ident != "Option" {
-        return None;
-    }
 
     let PathSegment {
         ident: _,
@@ -269,14 +304,159 @@ fn get_optional_type(ty: &Type) -> Option<&Type> {
     if args.len() != 1 {
         return None;
     }
-    if let Some(GenericArgument::Type(optional_type)) = args.first() {
-        Some(optional_type)
+    if let Some(GenericArgument::Type(inner_type)) = args.first() {
+        Some((path_seg, inner_type))
     } else {
         None
     }
 }
 
-/// Returns true if the type of a field is written literally as `Option<...>`.
-fn type_is_optional(ty: &Type) -> bool {
-    get_optional_type(ty).is_some()
+/// Gets the type T for a type written literally as `Option<T>`.
+fn get_optional_type(ty: &Type) -> Option<&Type> {
+    let (path_seg, inner_type) = get_simple_generic_and_inner_types(ty)?;
+    if path_seg.ident != "Option" {
+        return None;
+    }
+
+    Some(inner_type)
+}
+
+/// Gets the type T for a type written literally as `Vec<T>`.
+fn get_vec_inner_type(ty: &Type) -> Option<&Type> {
+    let (path_seg, inner_type) = get_simple_generic_and_inner_types(ty)?;
+    if path_seg.ident != "Vec" {
+        return None;
+    }
+
+    Some(inner_type)
+}
+
+pub(crate) struct BuilderField<'a> {
+    pub(crate) orig_name: TokenStream,
+    pub(crate) fn_name: TokenStream,
+    pub(crate) orig_span: Span,
+    pub(crate) ty: &'a Type,
+    pub(crate) optional_field_type: Option<&'a Type>,
+    pub(crate) meta: FieldMeta,
+}
+
+impl<'a> BuilderField<'a> {
+    pub(crate) fn from_data_struct(data_struct: &'a DataStruct) -> syn::Result<Vec<Self>> {
+        match &data_struct.fields {
+            Fields::Named(fields) => fields
+                .named
+                .iter()
+                .map(Self::from_named_syn_field)
+                .collect(),
+
+            Fields::Unnamed(fields) => fields
+                .unnamed
+                .iter()
+                .enumerate()
+                .map(|(i, f)| Self::from_unnamed_syn_field(f, i))
+                .collect(),
+
+            // Unit structs hold no fields
+            Fields::Unit => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) fn from_named_syn_field(syn_field: &'a syn::Field) -> syn::Result<Self> {
+        let orig_name = syn_field.ident.clone().unwrap();
+        let orig_name = quote_spanned! { syn_field.span() => #orig_name };
+        Self::from_syn_field_with_names(syn_field, orig_name.clone(), orig_name)
+    }
+
+    pub(crate) fn from_unnamed_syn_field(
+        syn_field: &'a syn::Field,
+        field_number: usize,
+    ) -> syn::Result<Self> {
+        let orig_name = Index::from(field_number);
+        let orig_name = quote_spanned! { syn_field.span() => #orig_name };
+
+        let fn_name = format_ident!("field_{field_number}");
+        let fn_name = quote_spanned! { syn_field.span() => #fn_name };
+
+        Self::from_syn_field_with_names(syn_field, orig_name, fn_name)
+    }
+
+    fn from_syn_field_with_names(
+        syn_field: &'a syn::Field,
+        orig_name: TokenStream,
+        fn_name: TokenStream,
+    ) -> syn::Result<Self> {
+        let orig_span = syn_field.span();
+        let meta = FieldMeta::from_field_builder_attr(syn_field)?;
+        let ty = &syn_field.ty;
+        let optional_field_type = get_optional_type(ty);
+
+        Ok(Self {
+            orig_name,
+            fn_name,
+            orig_span,
+            ty,
+            optional_field_type,
+            meta,
+        })
+    }
+
+    pub(crate) fn is_optional_field(&self) -> bool {
+        self.optional_field_type.is_some()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FieldMeta {
+    /// If a field has an attribute like `#[builder(each = "fn_name")]`, this is
+    /// the `"fn_name"` string that should be used to create a per-item builder
+    /// addition function.
+    ///
+    /// It can be assumed that any field tagged with the
+    /// `#[builder(each = ...)]` attribute is of a type that has a `Vec`-like
+    /// `.push(item)` method.
+    pub(crate) each_fn_opts: Option<BuilderEachFnOpts>,
+}
+
+pub(crate) struct BuilderEachFnOpts {
+    each_fn_name: Ident,
+    each_fn_ty: Type,
+}
+
+impl FieldMeta {
+    /// Validates and parses anything inside the `#[builder(...)]` field attribute.
+    pub(crate) fn from_field_builder_attr(field: &Field) -> syn::Result<Self> {
+        let mut field_meta = Self::default();
+
+        for attr in &field.attrs {
+            if attr.path().is_ident("builder") {
+                attr.parse_nested_meta(|meta| {
+                    let path = &meta.path;
+
+                    if path.is_ident("each") {
+                        let val = meta.value()?;
+                        let val_str: LitStr = val.parse()?;
+                        let val_ident: Ident = val_str.parse()?;
+                        let Some(each_fn_type) = get_vec_inner_type(&field.ty) else {
+                            return Err(meta.error("each functions can only be generated for vector fields where the type is written literally as `Vec<...>`"));
+                        };
+                        field_meta.each_fn_opts = Some(BuilderEachFnOpts {
+                            each_fn_name: val_ident,
+                            each_fn_ty: each_fn_type.clone(),
+                        });
+                    } else {
+                        return Err(meta.error("unsupported builder attribute property"));
+                    }
+
+                    Ok(())
+                })?;
+            }
+        }
+
+        Ok(field_meta)
+    }
+
+    /// Returns true if this field should have an `each` builder function generated
+    pub(crate) fn needs_each_fn(&self) -> bool {
+        self.each_fn_opts.is_some()
+    }
 }

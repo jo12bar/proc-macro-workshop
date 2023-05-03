@@ -11,7 +11,9 @@ use derive_builder::Builder;
 #[derive(Builder)]
 pub struct Command {
     executable: String,
+    #[builder(each = "arg")]
     args: Vec<String>,
+    #[builder(each = "env")]
     env: Vec<String>,
     current_dir: Option<String>,
 }
@@ -25,8 +27,10 @@ pub(self) struct Command3(u32, u32, u32, Option<f64>);
 fn main() {
     let mut builder = Command::builder();
     builder.executable("cargo".to_owned());
-    builder.args(vec!["build".to_owned(), "--release".to_owned()]);
-    builder.env(vec![]);
+    builder
+        .args(vec!["build".to_owned(), "--release".to_owned()])
+        .arg("--".to_owned())
+        .arg("--help".to_owned());
     builder.current_dir("..".to_owned());
 
     let command = builder.build().unwrap();
