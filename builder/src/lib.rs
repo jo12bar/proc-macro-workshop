@@ -64,7 +64,7 @@ fn builder_struct_decl_fields(
                 if f.is_optional_field() {
                     quote_spanned! { f.orig_span => #name: #ty }
                 } else {
-                    quote_spanned! { f.orig_span => #name: Option<#ty> }
+                    quote_spanned! { f.orig_span => #name: ::core::option::Option<#ty> }
                 }
             });
             quote! {
@@ -83,7 +83,7 @@ fn builder_struct_decl_fields(
                 if f.is_optional_field() {
                     quote_spanned! { f.orig_span => #ty }
                 } else {
-                    quote_spanned! { f.orig_span => Option<#ty> }
+                    quote_spanned! { f.orig_span => ::core::option::Option<#ty> }
                 }
             });
             quote! {
@@ -109,9 +109,9 @@ fn init_builder_struct_fields(
             let initialized_fields = builder_fields.iter().map(|f| {
                 let name = &f.orig_name;
                 if f.meta.needs_each_fn() {
-                    quote_spanned! { f.orig_span => #name: Some(Vec::new()) }
+                    quote_spanned! { f.orig_span => #name: ::core::option::Option::Some(::std::vec::Vec::new()) }
                 } else {
-                    quote_spanned! { f.orig_span => #name: None }
+                    quote_spanned! { f.orig_span => #name: ::core::option::Option::None }
                 }
             });
             quote! {
@@ -124,9 +124,9 @@ fn init_builder_struct_fields(
         Fields::Unnamed(_) => {
             let initialized_fields = builder_fields.iter().map(|f| {
                 if f.meta.needs_each_fn() {
-                    quote_spanned! { f.orig_span => Some(Vec::new()) }
+                    quote_spanned! { f.orig_span => ::core::option::Option::Some(::std::vec::Vec::new()) }
                 } else {
-                    quote_spanned! { f.orig_span => None }
+                    quote_spanned! { f.orig_span => ::core::option::Option::None }
                 }
             });
             quote! {
@@ -150,7 +150,7 @@ fn impl_builder_field_methods(builder_fields: &[BuilderField<'_>]) -> TokenStrea
 
         let mut builder_function = quote_spanned! { f.orig_span =>
             pub fn #fn_name (&mut self, #fn_name: #ty) -> &mut Self {
-                self.#orig_name = Some(#fn_name);
+                self.#orig_name = ::core::option::Option::Some(#fn_name);
                 self
             }
         };
@@ -267,11 +267,11 @@ fn impl_builder_build_method(
     );
 
     quote! {
-        pub fn build(&mut self) -> Result<#output_struct_name, Box<dyn std::error::Error>> {
+        pub fn build(&mut self) -> ::core::result::Result<#output_struct_name, ::std::boxed::Box<dyn ::std::error::Error>> {
             if #builder_has_unset_fields {
-                Err(#unset_err_msg.to_string().into())
+                ::core::result::Result::Err(#unset_err_msg.to_string().into())
             } else {
-                Ok(#struct_output)
+                ::core::result::Result::Ok(#struct_output)
             }
         }
     }
