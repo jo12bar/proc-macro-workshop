@@ -1,7 +1,7 @@
-use quote::quote;
-use syn::{parse_macro_input, parse_quote, spanned::Spanned, Field, Ident};
+use quote::{quote, quote_spanned};
+use syn::{parse_macro_input, parse_quote, spanned::Spanned, Expr, Field, Ident, Lit, LitStr};
 
-#[proc_macro_derive(CustomDebug)]
+#[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
 
@@ -45,8 +45,16 @@ fn generate_debug_fmt_fn_body(
         let name = &f.name;
         let name_str = name.to_string();
 
-        quote! {
-            .field(#name_str, &self.#name)
+        let debug_output = if let Some(debug_format_string) = f.meta.debug_format_string {
+            quote_spanned! { f.field.span() =>
+                &::core::format_args!(#debug_format_string, &self.#name)
+            }
+        } else {
+            quote_spanned! { f.field.span() => &self.#name }
+        };
+
+        quote_spanned! { f.field.span() =>
+            .field(#name_str, #debug_output)
         }
     });
 
@@ -60,6 +68,7 @@ fn generate_debug_fmt_fn_body(
 /// A utility struct for easier access to information about one of the target struct's fields.
 struct FieldInfo<'f> {
     name: &'f Ident,
+    meta: FieldMeta<'f>,
 
     /// The base [`syn::Field`] in case if more ad-hoc inspection needs to be done
     /// and it doesn't make sense to offload the work to [`FieldInfo::new()`].
@@ -79,7 +88,41 @@ impl<'f> FieldInfo<'f> {
             ));
         };
 
-        Ok(Self { name, field })
+        let meta = FieldMeta::new(field)?;
+
+        Ok(Self { name, meta, field })
+    }
+}
+
+/// Information gleaned by parsing attributes on a field.
+#[derive(Default)]
+struct FieldMeta<'f> {
+    debug_format_string: Option<&'f LitStr>,
+}
+
+impl<'f> FieldMeta<'f> {
+    fn new(field: &'f Field) -> syn::Result<Self> {
+        use syn::Meta;
+
+        let mut this = Self::default();
+
+        for attr in &field.attrs {
+            if attr.path().is_ident("debug") {
+                let Meta::NameValue(name_value) = &attr.meta else {
+                    return Err(syn::Error::new_spanned(&attr.meta, "unrecognized attribute"))
+                };
+                let Expr::Lit(lit_expr) = &name_value.value else {
+                    return Err(syn::Error::new_spanned(&name_value.value, "expected string literal"))
+                };
+                let Lit::Str(lit_str) = &lit_expr.lit else {
+                    return Err(syn::Error::new_spanned(&lit_expr.lit, "expected string literal"))
+                };
+
+                this.debug_format_string = Some(lit_str);
+            }
+        }
+
+        Ok(this)
     }
 }
 
