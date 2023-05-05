@@ -1,11 +1,17 @@
 use quote::{quote, quote_spanned};
-use syn::{parse_macro_input, parse_quote, spanned::Spanned, Expr, Field, Ident, Lit, LitStr};
+use syn::{
+    parse_macro_input, parse_quote, spanned::Spanned, Expr, Field, GenericParam, Generics, Ident,
+    Lit, LitStr,
+};
 
 #[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(input as syn::DeriveInput);
+    let mut input = parse_macro_input!(input as syn::DeriveInput);
 
     let struct_name = &input.ident;
+
+    // Add a bound `T: fmt::Debug` to every type parameter `T`
+    add_trait_bounds(&mut input.generics);
     let (impl_generics, impl_ty_generics, impl_where_clause) = input.generics.split_for_impl();
 
     let fields = match extract_all_field_info(&input) {
@@ -31,6 +37,15 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     };
 
     expanded_output.into()
+}
+
+/// Add a bound `T: fmt::Debug` to every type parameter `T`.
+fn add_trait_bounds(generics: &mut Generics) {
+    for param in &mut generics.params {
+        if let GenericParam::Type(ref mut type_param) = *param {
+            type_param.bounds.push(parse_quote! { ::core::fmt::Debug });
+        }
+    }
 }
 
 /// Generates the body of the [`core::fmt::Debug::fmt()`] implementation function.
